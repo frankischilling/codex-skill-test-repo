@@ -1,0 +1,1 @@
+One note for the cloned repo author guard test.
