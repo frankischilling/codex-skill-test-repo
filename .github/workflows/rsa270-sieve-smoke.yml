@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 340
     env:
       GH_TOKEN: ${{ github.token }}
-      N: 233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207
+      N: "233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207"
     steps:
       - uses: actions/checkout@v4
       - name: Install runtime dependencies
@@ -29,6 +29,11 @@ jobs:
           cd tool-artifact
           sha256sum -c rsa270-cado-built-tools.tar.zst.sha256
           tar --zstd -xf rsa270-cado-built-tools.tar.zst -C "$GITHUB_WORKSPACE"
+          CADO="$GITHUB_WORKSPACE/rsa270-tool-bundle/cado"
+          BUILD=$(find "$CADO/build" -mindepth 1 -maxdepth 1 -type d | head -1)
+          printf '%s\n' "$CADO" > "$BUILD/source-location.txt"
+          ln -sfn "$(basename "$BUILD")" "$CADO/build/localhost"
+          "$CADO/build/localhost/cado-nfs-client.py" --help >/dev/null
       - name: Run one real RSA-270 sieve work unit
         run: |
           set +e
@@ -42,8 +47,9 @@ jobs:
             "$N" \
             "tasks.polyselect.import=$POLY" \
             "tasks.workdir=$WORK" \
-            "tasks.sieve.qmin=1073322392" \
-            "tasks.sieve.qrange=100" \
+            "tasks.qmin=1073322392" \
+            "tasks.sieve.qrange=10" \
+            "tasks.sieve.rels_wanted=1" \
             "tasks.sieve.las.threads=4" \
             "tasks.maxwu=1" \
             "tasks.filter.run=False" \
