@@ -1,0 +1,88 @@
+name: RSA-270 CADO tool bundle
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+timeout-minutes: 120
+
+jobs:
+  build-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout scratch branch
+        uses: actions/checkout@v4
+
+      - name: Install CADO build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libgmp-dev libhwloc-dev \
+            python3 python3-venv python3-pip perl git xz-utils zstd
+
+      - name: Build CADO-NFS modern
+        run: |
+          git clone --depth 1 --branch v3.4.0-modern \
+            https://github.com/doublegate/cado-nfs-modern.git cado-nfs-modern
+          cd cado-nfs-modern
+          bash scripts/setup-venv.sh
+          make -j"$(nproc)"
+          PY=cado-nfs.venv/bin/python3
+          OUT=$("$PY" ./cado-nfs.py 90377629292003121684002147101760858109247336549001090677693 -t 2)
+          echo "smoke factors: $OUT"
+          python3 - "$OUT" <<'PY'
+          import sys
+          N = 90377629292003121684002147101760858109247336549001090677693
+          fs = [int(x) for x in sys.argv[1].split()]
+          p = 1
+          for f in fs:
+              p *= f
+          assert p == N
+          PY
+
+      - name: Collect YAFU GGNFS lattice sievers
+        run: |
+          git clone --depth 1 https://github.com/bbuhrow/yafu.git yafu-src
+          mkdir -p rsa270-tool-bundle/ggnfs
+          cp -a yafu-src/factor/lasieve5_64/bin/gnfs-lasieve4I* rsa270-tool-bundle/ggnfs/
+          cp -a yafu-src/factor/lasieve5_64/bin/avx512 rsa270-tool-bundle/ggnfs/avx512
+
+      - name: Add verified RSA-270 polynomial and parameters
+        run: |
+          mkdir -p rsa270-tool-bundle/campaign
+          cat > rsa270-tool-bundle/campaign/RSA-270-best-cado.poly <<'EOF'
+          n: 233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207
+          skew: 14627893992.01
+          c0: 364247333275683342472365165550476120730693693328818157502991593984
+          c1: 1153973715089888191946389898261544454239234565820467806984
+          c2: -236435216210702701902151548470267342947180119662
+          c3: -44103587181491086831987630081373613537
+          c4: 4057688710924064290332793594
+          c5: 118153186763991104
+          c6: 240240
+          Y0: -99499021054511834692076135344701239177544641
+          Y1: 6382870559300260766501
+          EOF
+          cp cado-nfs-modern/parameters/factor/params.c270 rsa270-tool-bundle/campaign/params.c270
+
+      - name: Package source, build, and tools
+        run: |
+          mkdir -p rsa270-tool-bundle/cado
+          rsync -a --exclude=.git cado-nfs-modern/ rsa270-tool-bundle/cado/
+          tar --zstd -cf rsa270-cado-built-tools.tar.zst rsa270-tool-bundle
+          sha256sum rsa270-cado-built-tools.tar.zst > rsa270-cado-built-tools.tar.zst.sha256
+          ls -lh rsa270-cado-built-tools.tar.zst*
+
+      - name: Upload tool bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-cado-built-tools
+          path: |
+            rsa270-cado-built-tools.tar.zst
+            rsa270-cado-built-tools.tar.zst.sha256
+          compression-level: 0
+          retention-days: 7
