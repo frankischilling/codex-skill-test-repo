@@ -1,0 +1,32 @@
+name: RSA-270 CADO runtime libraries
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and collect runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libhwloc15 hwloc
+          mkdir -p runtime/lib runtime/bin
+          cp -Lv /usr/lib/x86_64-linux-gnu/libhwloc.so.15* runtime/lib/
+          cp -Lv /usr/lib/x86_64-linux-gnu/hwloc/*.so runtime/lib/ 2>/dev/null || true
+          cp -Lv /usr/bin/lstopo-no-graphics /usr/bin/hwloc-* runtime/bin/ 2>/dev/null || true
+          ldd /usr/lib/x86_64-linux-gnu/libhwloc.so.15 | tee runtime/libhwloc.ldd.txt
+          sha256sum runtime/lib/* > runtime/SHA256SUMS
+          tar -czf rsa270-cado-runtime-libs.tar.gz runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-cado-runtime-libs
+          path: rsa270-cado-runtime-libs.tar.gz
+          retention-days: 7
