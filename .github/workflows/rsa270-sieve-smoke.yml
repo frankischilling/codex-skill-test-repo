@@ -1,0 +1,92 @@
+name: RSA-270 GNFS sieve work unit
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sieve-one-workunit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: 233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libhwloc15 hwloc zstd python3
+      - name: Download the verified CADO build artifact
+        run: |
+          mkdir tool-artifact
+          gh run download 33816982558 -R "$GITHUB_REPOSITORY" -n rsa270-cado-built-tools -D tool-artifact
+          cd tool-artifact
+          sha256sum -c rsa270-cado-built-tools.tar.zst.sha256
+          tar --zstd -xf rsa270-cado-built-tools.tar.zst -C "$GITHUB_WORKSPACE"
+      - name: Run one real RSA-270 sieve work unit
+        run: |
+          set +e
+          ROOT="$GITHUB_WORKSPACE/rsa270-tool-bundle"
+          CADO="$ROOT/cado"
+          POLY="$ROOT/campaign/RSA-270-best-cado.poly"
+          WORK="$GITHUB_WORKSPACE/rsa270-work-q1073322392"
+          cd "$CADO"
+          date -u +%FT%TZ | tee "$GITHUB_WORKSPACE/sieve-started.utc"
+          timeout 300m ./cado-nfs.venv/bin/python3 ./cado-nfs.py \
+            "$N" \
+            "tasks.polyselect.import=$POLY" \
+            "tasks.workdir=$WORK" \
+            "tasks.sieve.qmin=1073322392" \
+            "tasks.sieve.qrange=100" \
+            "tasks.sieve.las.threads=4" \
+            "tasks.maxwu=1" \
+            "tasks.filter.run=False" \
+            "slaves.nrclients=1" \
+            "slaves.hostnames=localhost" \
+            -t 4 --no-colors --filelog DEBUG --screenlog INFO \
+            2>&1 | tee "$GITHUB_WORKSPACE/rsa270-sieve.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$GITHUB_WORKSPACE/rsa270-sieve.rc"
+          date -u +%FT%TZ | tee "$GITHUB_WORKSPACE/sieve-finished.utc"
+          exit 0
+      - name: Exact factor verification and checkpoint manifest
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, math
+          N=int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          log=pathlib.Path('rsa270-sieve.log').read_text(errors='replace') if pathlib.Path('rsa270-sieve.log').exists() else ''
+          nums={int(x) for x in re.findall(r'\b\d{20,}\b',log)}
+          hits=[]
+          for x in nums:
+              g=math.gcd(N,x)
+              if 1<g<N:
+                  hits.append((g,N//g,g*(N//g)==N))
+          work=pathlib.Path('rsa270-work-q1073322392')
+          files=[]
+          if work.exists():
+              for p in work.rglob('*'):
+                  if p.is_file(): files.append({'path':str(p.relative_to(work)),'bytes':p.stat().st_size})
+          out={'N':str(N),'verified_factors':[{'p':str(p),'q':str(q),'product_verified':ok} for p,q,ok in hits], 'work_files':files, 'return_code':pathlib.Path('rsa270-sieve.rc').read_text().strip() if pathlib.Path('rsa270-sieve.rc').exists() else None}
+          pathlib.Path('rsa270-sieve-manifest.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2)[:10000])
+          PY
+      - name: Package checkpoint
+        run: |
+          tar -czf rsa270-sieve-q1073322392-checkpoint.tar.gz \
+            rsa270-work-q1073322392 rsa270-sieve.log rsa270-sieve.rc \
+            rsa270-sieve-manifest.json sieve-started.utc sieve-finished.utc
+          sha256sum rsa270-sieve-q1073322392-checkpoint.tar.gz > rsa270-sieve-q1073322392-checkpoint.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-sieve-q1073322392-checkpoint
+          path: |
+            rsa270-sieve-q1073322392-checkpoint.tar.gz
+            rsa270-sieve-q1073322392-checkpoint.tar.gz.sha256
+          compression-level: 0
+          retention-days: 7
