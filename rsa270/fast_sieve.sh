@@ -22,7 +22,7 @@ cd "$ROOT"
 gh run download 33818693904 --repo "$GITHUB_REPOSITORY" \
     --name rsa270-cado-built-tools --dir downloaded
 ACTUAL=$(sha256sum downloaded/rsa270-cado-built-tools.tar.zst | cut -d' ' -f1)
-test "$ACTUAL" = "0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af"
+test "$ACTUAL" = "2bd8bd40e89bb017b2b6af102032e97fee8ef111145a22a63798237d229bfa5f"
 tar --zstd -xf downloaded/rsa270-cado-built-tools.tar.zst -C extracted
 POLY=$(find extracted -type f -name 'RSA-270-best-cado.poly' -print -quit)
 test -n "$POLY"
@@ -33,16 +33,23 @@ CADO="$ROOT/cado-nfs-modern"
 BUILD=$(find "$CADO/build" -mindepth 1 -maxdepth 1 -type d -print -quit)
 test -n "$BUILD"
 printf '%s\n' "$CADO" > "$BUILD/source-location.txt"
-"$BUILD/sieve/las" -version | tee "$OUT/work/original-las-version.txt"
+ldd "$BUILD/sieve/las" | tee "$OUT/work/original-las-linkage.txt"
 
+# RSA-270 uses 38/39-bit large-prime bounds and can exceed 2^32 ideals.
+# Recompile every dependent object normally; CMake's target/fast shortcuts skip
+# dependency checking and are incorrect after changing this ABI-defining header.
 sed -i 's/^#define SIZEOF_P_R_VALUES 4$/#define SIZEOF_P_R_VALUES 8/' "$CADO/utils/typedefs.h"
-test "$(awk '/^#define SIZEOF_P_R_VALUES/{print $3}' "$CADO/utils/typedefs.h)" = 8
+sed -i 's/^#define SIZEOF_INDEX 4$/#define SIZEOF_INDEX 8/' "$CADO/utils/typedefs.h"
+test "$(awk '$1=="#define" && $2=="SIZEOF_P_R_VALUES" {print $3}' "$CADO/utils/typedefs.h")" = 8
+test "$(awk '$1=="#define" && $2=="SIZEOF_INDEX" {print $3}' "$CADO/utils/typedefs.h")" = 8
 touch "$CADO/utils/typedefs.h"
 /usr/bin/time -v -o "$OUT/work/rebuild.time" \
-    make -C "$BUILD" -j4 freerel/fast makefb/fast las/fast \
+    cmake --build "$BUILD" --parallel 4 --target freerel makefb las \
     > "$OUT/work/rebuild.stdout" 2> "$OUT/work/rebuild.stderr"
 sha256sum "$BUILD/sieve/freerel" "$BUILD/sieve/makefb" "$BUILD/sieve/las" \
     | tee "$OUT/work/64bit-binaries.sha256"
+grep -E '^#define SIZEOF_(P_R_VALUES|INDEX)' "$CADO/utils/typedefs.h" \
+    | tee "$OUT/work/64bit-typedefs.txt"
 
 python3 - <<'PY'
 from pathlib import Path
@@ -52,16 +59,23 @@ y0=-99499021054511834692076135344701239177544641
 y1=6382870559300260766501
 R=sum(c[i]*(-y0)**i*y1**(6-i) for i in range(7))
 assert R==N
-Path('campaign/work/resultant-verification.txt').write_text('resultant_equals_N=true\nresultant_quotient=1\n')
+m=(-y0)*pow(y1,-1,N)%N
+assert sum(c[i]*pow(m,i,N) for i in range(7))%N==0
+Path('campaign/work/resultant-verification.txt').write_text(
+    'resultant_equals_N=true\nresultant_quotient=1\ncommon_root_mod_N=true\n')
 PY
 
+# Exercise 64-bit p/r storage with primes above 2^32 before the expensive FB.
 "$BUILD/sieve/freerel" \
-    -poly "$OUT/RSA-270.poly" -lpb0 38 -lpb1 39 \
-    -pmin 1073741800 -pmax 1073741950 \
+    -poly "$OUT/RSA-270.poly" -lpb0 38 -lpb1 39 -t 4 \
+    -pmin 4294967300 -pmax 4294967800 \
+    -renumber "$OUT/work/freerel-renumber.gz" \
     -out "$OUT/work/freerel-64bit-check.gz" \
     > "$OUT/work/freerel-check.stdout" 2> "$OUT/work/freerel-check.stderr"
+gzip -t "$OUT/work/freerel-renumber.gz"
 gzip -t "$OUT/work/freerel-64bit-check.gz"
 
+# Production algebraic factor base for the published RSA-270 polynomial.
 /usr/bin/time -v -o "$OUT/work/makefb.time" \
     "$BUILD/sieve/makefb" \
       -poly "$OUT/RSA-270.poly" -lim 2146644785 -maxbits 18 \
@@ -71,6 +85,7 @@ gzip -t "$OUT/work/c270.roots1.gz"
 sha256sum "$OUT/work/c270.roots1.gz" | tee "$OUT/work/c270.roots1.gz.sha256"
 free -h | tee "$OUT/work/memory-before-las.txt"
 
+# Select actual algebraic special-q roots in CADO's recommended q range.
 "$BUILD/sieve/las" \
     -poly "$OUT/RSA-270.poly" \
     -lim0 1071225238 -lim1 2146644785 \
@@ -101,20 +116,24 @@ gzip -t "$OUT/work/relations.gz"
 set -e
 
 python3 - <<'PY'
-import gzip,json,math,pathlib
+import gzip,json,math,pathlib,re
 N=int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
 c=[364247333275683342472365165550476120730693693328818157502991593984,1153973715089888191946389898261544454239234565820467806984,-236435216210702701902151548470267342947180119662,-44103587181491086831987630081373613537,4057688710924064290332793594,118153186763991104,240240]
 y0=-99499021054511834692076135344701239177544641
 y1=6382870559300260766501
 todos=[]
 for line in pathlib.Path('campaign/work/todo.txt').read_text().splitlines():
-    z=line.split(); todos.append((int(z[0]),int(z[1]),int(z[2])))
+    z=line.split()
+    if len(z)>=3: todos.append((int(z[0]),int(z[1]),int(z[2])))
 lines=[]
 p=pathlib.Path('campaign/work/relations.gz')
-if p.exists(): lines=[x.strip() for x in gzip.open(p,'rt',errors='strict') if x.strip() and not x.startswith('#')]
+if p.exists():
+    lines=[x.strip() for x in gzip.open(p,'rt',errors='strict') if x.strip() and not x.startswith('#')]
 rows=[]; hits=[]
 for line in lines:
-    h=line.split(':'); a,b=map(int,h[0].split(','))
+    h=line.split(':')
+    if len(h)<3: continue
+    a,b=map(int,h[0].split(','))
     rf=[int(x,16) for x in h[1].split(',') if x]
     af=[int(x,16) for x in h[2].split(',') if x]
     rn=abs(y1*a+y0*b)
