@@ -1,5 +1,5 @@
 name: RSA-270 fast 64-bit GNFS sieve v3
-# campaign-trigger: 2026-09-04T15:25Z
+# campaign-trigger: 2026-09-04T15:32Z
 
 on:
   push:
@@ -43,6 +43,9 @@ jobs:
           s = s.replace(
               '"$BUILD/sieve/las" -version | tee "$OUT/work/original-las-version.txt"',
               'ldd "$BUILD/sieve/las" | tee "$OUT/work/original-las-version.txt"')
+          s = s.replace(
+              'test "$(awk \'/^#define SIZEOF_P_R_VALUES/{print $3}\' "$CADO/utils/typedefs.h)" = 8',
+              'test "$(awk \'$1=="#define" && $2=="SIZEOF_P_R_VALUES" {print $3}\' "$CADO/utils/typedefs.h")" = 8')
           p.write_text(s)
           PY
           chmod +x rsa270/fast_sieve.sh
