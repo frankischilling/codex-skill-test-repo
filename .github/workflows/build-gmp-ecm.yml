@@ -1,0 +1,46 @@
+name: Build standalone GMP-ECM
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/build-gmp-ecm.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+timeout-minutes: 90
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool m4 git libgmp-dev
+      - name: Build static GMP-ECM
+        run: |
+          git clone --depth 1 https://github.com/sethtroisi/gmp-ecm.git
+          cd gmp-ecm
+          autoreconf -i
+          ./configure --disable-shared --enable-static CFLAGS='-O3 -march=x86-64-v2' LDFLAGS='-static'
+          make -j"$(nproc)"
+          strip ecm || true
+          file ecm
+          ldd ecm || true
+          printf '1000003\n' | ./ecm -pp1 1000 10000
+          mkdir -p ../artifact
+          cp ecm ../artifact/gmp-ecm-static
+          cp README* ../artifact/ 2>/dev/null || true
+          ./ecm -v > ../artifact/version.txt 2>&1 || true
+          sha256sum ../artifact/gmp-ecm-static > ../artifact/gmp-ecm-static.sha256
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmp-ecm-static
+          path: artifact/
+          compression-level: 0
+          retention-days: 7
