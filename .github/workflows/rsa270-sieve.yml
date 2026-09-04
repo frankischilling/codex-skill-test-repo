@@ -44,19 +44,20 @@ jobs:
 
       - name: Rehydrate relocatable CADO runtime
         run: |
-          mkdir -p runtime-root
+          mkdir -p runtime-root campaign-output rsa270-work
           tar --zstd -xf downloaded/tools/rsa270-cado-built-tools.tar.zst -C runtime-root
           tar -xzf downloaded/runtime/rsa270-cado-runtime-libs.tar.gz -C runtime-root
           CADO="$PWD/runtime-root/rsa270-tool-bundle/cado"
           BUILD=$(find "$CADO/build" -mindepth 1 -maxdepth 1 -type d | head -1)
+          test -x "$BUILD/sieve/las"
+          test -f "$BUILD/cado-nfs.py"
           printf '%s\n' "$CADO" > "$BUILD/source-location.txt"
           echo "CADO=$CADO" >> "$GITHUB_ENV"
           echo "BUILD=$BUILD" >> "$GITHUB_ENV"
           echo "CAM=$PWD/runtime-root/rsa270-tool-bundle/campaign" >> "$GITHUB_ENV"
           echo "RUNTIME_LIB=$PWD/runtime-root/runtime/lib" >> "$GITHUB_ENV"
           echo "WORK=$PWD/rsa270-work" >> "$GITHUB_ENV"
-          LD_LIBRARY_PATH="$PWD/runtime-root/runtime/lib" "$BUILD/sieve/las" -version
-          strings "$BUILD/sieve/las" | grep -q SIZEOF_P_R_VALUES || true
+          LD_LIBRARY_PATH="$PWD/runtime-root/runtime/lib" ldd "$BUILD/sieve/las"
 
       - name: Run one official-parameter special-q work unit
         id: sieve
@@ -73,7 +74,6 @@ jobs:
               "$N" \
               "$CAM/params.c270" \
               "tasks.polyselect.import=$CAM/RSA-270-best-cado.poly" \
-              tasks.polyselect.admax=0 \
               tasks.maxwu=1 \
               "tasks.sieve.qmin=$QMIN" \
               "tasks.sieve.qmax=$QMAX" \
@@ -97,6 +97,7 @@ jobs:
       - name: Verify all result-like integers exactly
         if: always()
         run: |
+          mkdir -p campaign-output
           python3 - <<'PY'
           import gzip, json, math, pathlib, re
           N = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
@@ -127,10 +128,11 @@ jobs:
       - name: Record relation and checkpoint inventory
         if: always()
         run: |
+          mkdir -p campaign-output
           find rsa270-work -type f -printf '%P\t%s\n' | sort > campaign-output/work-files.tsv || true
           find rsa270-work -type f \( -name '*.gz' -o -name '*.rels' \) -print > campaign-output/relation-files.txt || true
-          cp "$CAM/RSA-270-best-cado.poly" campaign-output/
-          cp "$CAM/params.c270" campaign-output/
+          cp "$CAM/RSA-270-best-cado.poly" campaign-output/ 2>/dev/null || true
+          cp "$CAM/params.c270" campaign-output/ 2>/dev/null || true
           sqlite3 rsa270-work/c270.db '.tables' > campaign-output/db-tables.txt 2>&1 || true
           tail -500 rsa270-work/c270.log > campaign-output/c270-log-tail.txt 2>/dev/null || true
 
@@ -145,7 +147,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rsa270-gnfs-q1073322392-1073332392-official
+          name: rsa270-gnfs-q1073322392-1073332392-official-v2
           path: |
             rsa270-workunit-checkpoint.tar.zst
             rsa270-workunit-checkpoint.tar.zst.sha256
