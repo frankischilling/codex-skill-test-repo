@@ -9,11 +9,10 @@ on:
 permissions:
   contents: read
 
-timeout-minutes: 90
-
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
