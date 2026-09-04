@@ -1,11 +1,12 @@
-name: RSA-270 fast 64-bit GNFS sieve v3
-# campaign-trigger: 2026-09-04T15:32Z
+name: RSA-270 fast 64-bit GNFS sieve v4
+# campaign-trigger: 2026-09-04T15:38Z
 
 on:
   push:
     branches: [rsa270-campaign-20260903]
     paths:
       - .github/workflows/rsa270-sieve-fast2.yml
+      - rsa270/fast_sieve.sh
   workflow_dispatch:
 
 permissions:
@@ -30,24 +31,9 @@ jobs:
           free -h
           df -h .
 
-      - name: Run checksum-verified 64-bit CADO sieve driver
+      - name: Rebuild with 64-bit ideal/index types and collect relations
         continue-on-error: true
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('rsa270/fast_sieve.sh')
-          s = p.read_text()
-          s = s.replace(
-              '0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af',
-              '2bd8bd40e89bb017b2b6af102032e97fee8ef111145a22a63798237d229bfa5f')
-          s = s.replace(
-              '"$BUILD/sieve/las" -version | tee "$OUT/work/original-las-version.txt"',
-              'ldd "$BUILD/sieve/las" | tee "$OUT/work/original-las-version.txt"')
-          s = s.replace(
-              'test "$(awk \'/^#define SIZEOF_P_R_VALUES/{print $3}\' "$CADO/utils/typedefs.h)" = 8',
-              'test "$(awk \'$1=="#define" && $2=="SIZEOF_P_R_VALUES" {print $3}\' "$CADO/utils/typedefs.h")" = 8')
-          p.write_text(s)
-          PY
           chmod +x rsa270/fast_sieve.sh
           mkdir -p campaign/work
           set +e
@@ -62,7 +48,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rsa270-fast3-q1073322392
+          name: rsa270-fast4-q1073322392
           path: |
             rsa270-fast3-checkpoint.tar.zst
             rsa270-fast3-checkpoint.tar.zst.sha256
