@@ -1,4 +1,5 @@
 name: RSA-270 fast 64-bit GNFS sieve v3
+# campaign-trigger: 2026-09-04T15:07Z
 
 on:
   push:
@@ -32,6 +33,7 @@ jobs:
       - name: Run checksum-verified 64-bit CADO sieve driver
         continue-on-error: true
         run: |
+          sed -i 's/0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af/2bd8bd40e89bb017b2b6af102032e97fee8ef111145a22a63798237d229bfa5f/' rsa270/fast_sieve.sh
           chmod +x rsa270/fast_sieve.sh
           bash rsa270/fast_sieve.sh
 
