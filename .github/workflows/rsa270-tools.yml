@@ -22,7 +22,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake libgmp-dev libhwloc-dev \
-            python3 python3-venv python3-pip perl git xz-utils zstd rsync
+            python3 python3-venv python3-pip python3-flask python3-requests \
+            perl git xz-utils zstd rsync
 
       - name: Build CADO-NFS with 64-bit p/r values and indexes
         run: |
