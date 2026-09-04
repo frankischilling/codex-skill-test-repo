@@ -1,0 +1,172 @@
+name: RSA-270 direct 64-bit GNFS sieve
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-sieve-direct-64.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-sieve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      N: "233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207"
+      QMIN: "1073322392"
+      QMAX: "1073332392"
+
+    steps:
+      - name: Checkout campaign branch
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git libgmp-dev libhwloc-dev \
+            python3 python3-venv perl zstd sqlite3
+
+      - name: Build CADO-NFS with 64-bit ideal encoding
+        run: |
+          git clone --depth 1 --branch v3.4.0-modern \
+            https://github.com/doublegate/cado-nfs-modern.git cado
+          cd cado
+          sed -i 's/^#define SIZEOF_P_R_VALUES 4$/#define SIZEOF_P_R_VALUES 8/' utils/typedefs.h
+          grep '^#define SIZEOF_P_R_VALUES' utils/typedefs.h
+          cat > local.sh <<'EOF'
+          FLAGS_SIZE="-DSIZEOF_P_R_VALUES=8"
+          EOF
+          make -j"$(nproc)" FLAGS_SIZE="-DSIZEOF_P_R_VALUES=8"
+          BUILD=$(find "$PWD/build" -mindepth 1 -maxdepth 1 -type d | head -1)
+          test -x "$BUILD/sieve/las"
+          test -x "$BUILD/sieve/makefb"
+          test -x "$BUILD/sieve/freerel"
+          grep -R -- '-DSIZEOF_P_R_VALUES=8' "$BUILD"/CMakeFiles "$BUILD"/sieve/CMakeFiles | head -20
+          echo "CADO=$PWD" >> "$GITHUB_ENV"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          "$BUILD/sieve/las" -version
+
+      - name: Write and algebraically verify the RSA-270 polynomial
+        run: |
+          mkdir -p campaign
+          cat > campaign/RSA-270.poly <<'EOF'
+          n: 233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207
+          skew: 14627893992.01
+          c0: 364247333275683342472365165550476120730693693328818157502991593984
+          c1: 1153973715089888191946389898261544454239234565820467806984
+          c2: -236435216210702701902151548470267342947180119662
+          c3: -44103587181491086831987630081373613537
+          c4: 4057688710924064290332793594
+          c5: 118153186763991104
+          c6: 240240
+          Y0: -99499021054511834692076135344701239177544641
+          Y1: 6382870559300260766501
+          EOF
+          python3 - <<'PY'
+          import math, pathlib
+          N = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          c = [364247333275683342472365165550476120730693693328818157502991593984,1153973715089888191946389898261544454239234565820467806984,-236435216210702701902151548470267342947180119662,-44103587181491086831987630081373613537,4057688710924064290332793594,118153186763991104,240240]
+          y0 = -99499021054511834692076135344701239177544641
+          y1 = 6382870559300260766501
+          resultant = sum(c[i] * (-y0)**i * y1**(6-i) for i in range(7))
+          assert resultant == N
+          pathlib.Path("campaign/resultant-verification.txt").write_text(f"resultant_equals_N={resultant == N}\nresultant_quotient={resultant // N}\n")
+          PY
+
+      - name: Generate production algebraic factor base
+        run: |
+          mkdir -p campaign/work
+          /usr/bin/time -v -o campaign/makefb.time \
+            "$BUILD/sieve/makefb" \
+              -poly campaign/RSA-270.poly \
+              -lim 2146644785 \
+              -maxbits 18 \
+              -out campaign/work/c270.roots1.gz \
+              -side 1 -t 4 \
+              > campaign/makefb.stdout 2> campaign/makefb.stderr
+          gzip -t campaign/work/c270.roots1.gz
+          sha256sum campaign/work/c270.roots1.gz | tee campaign/work/c270.roots1.gz.sha256
+          ls -lh campaign/work/c270.roots1.gz
+
+      - name: Enumerate and select production special-q roots
+        run: |
+          "$BUILD/sieve/las" \
+            -poly campaign/RSA-270.poly \
+            -lim0 1071225238 -lim1 2146644785 \
+            -lpb0 38 -lpb1 39 -mfb0 109 -mfb1 120 \
+            -ncurves0 28 -ncurves1 31 -I 18 \
+            -q0 "$QMIN" -q1 "$QMAX" -sqside 1 \
+            -fb1 campaign/work/c270.roots1.gz \
+            -print-todo-list -t 4 \
+            > campaign/work/las-todo-all.txt 2> campaign/work/las-todo.stderr
+          grep '^1 ' campaign/work/las-todo-all.txt | head -10 > campaign/work/las-todo-selected.txt
+          test "$(wc -l < campaign/work/las-todo-selected.txt)" -eq 10
+          cat campaign/work/las-todo-selected.txt
+
+      - name: Run ten production I=18 special-q roots
+        id: las
+        continue-on-error: true
+        run: |
+          set +e
+          /usr/bin/time -v -o campaign/work/las.time \
+            timeout --signal=INT --kill-after=60s 15000s \
+            "$BUILD/sieve/las" \
+              -poly campaign/RSA-270.poly \
+              -lim0 1071225238 -lim1 2146644785 \
+              -lpb0 38 -lpb1 39 -mfb0 109 -mfb1 120 \
+              -ncurves0 28 -ncurves1 31 -I 18 \
+              -sqside 1 -fb1 campaign/work/c270.roots1.gz \
+              -todo campaign/work/las-todo-selected.txt \
+              -out campaign/work/relations.gz \
+              -t 4 -production -stats-stderr -job-memory 12 \
+              > campaign/work/las.stdout 2> campaign/work/las.stderr
+          rc=$?
+          echo "$rc" | tee campaign/work/las.rc
+          gzip -t campaign/work/relations.gz || true
+          exit 0
+
+      - name: Verify every result-like integer by exact division
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import gzip, json, pathlib, re
+          N = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          hits=[]; checked=0; files=0
+          for p in pathlib.Path("campaign").rglob("*"):
+              if not p.is_file() or p.stat().st_size > 100_000_000:
+                  continue
+              try:
+                  text = gzip.open(p,"rt",errors="replace").read() if p.suffix==".gz" else p.read_text(errors="replace")
+              except Exception:
+                  continue
+              files += 1
+              for s in set(re.findall(r"(?<!\\d)\\d{20,300}(?!\\d)",text)):
+                  x=int(s); checked += 1
+                  if 1 < x < N and N % x == 0:
+                      q=N//x; hits.append({"file":str(p),"p":str(x),"q":str(q),"product_verified":x*q==N})
+          result={"N":str(N),"files_scanned":files,"numeric_candidates_checked":checked,"verified_hits":hits}
+          pathlib.Path("campaign/work/exact-verification.json").write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Package resumable production checkpoint
+        if: always()
+        run: |
+          find campaign -type f -printf '%P\t%s\n' | sort > campaign/work/files.tsv
+          tar --zstd -cf rsa270-direct-64-checkpoint.tar.zst campaign
+          sha256sum rsa270-direct-64-checkpoint.tar.zst > rsa270-direct-64-checkpoint.tar.zst.sha256
+          ls -lh rsa270-direct-64-checkpoint.tar.zst*
+
+      - name: Upload checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-direct-64-q1073322392
+          path: |
+            rsa270-direct-64-checkpoint.tar.zst
+            rsa270-direct-64-checkpoint.tar.zst.sha256
+          compression-level: 0
+          retention-days: 14
