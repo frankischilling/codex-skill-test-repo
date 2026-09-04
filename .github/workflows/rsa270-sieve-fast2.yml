@@ -1,0 +1,170 @@
+name: RSA-270 fast 64-bit GNFS sieve v2
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-sieve-fast2.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sieve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QMIN: "1073322392"
+      QMAX: "1073332392"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install targeted dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libgmp-dev libhwloc-dev python3 zstd sqlite3
+          free -h
+          df -h .
+
+      - name: Rehydrate checksum-verified CADO build
+        run: |
+          mkdir -p downloaded extracted campaign/work
+          gh run download 33818693904 --repo "$GITHUB_REPOSITORY" \
+            --name rsa270-cado-built-tools --dir downloaded
+          test "$(sha256sum downloaded/rsa270-cado-built-tools.tar.zst | cut -d' ' -f1)" = \
+            "0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af"
+          tar --zstd -xf downloaded/rsa270-cado-built-tools.tar.zst -C extracted
+          POLY=$(find extracted -type f -name 'RSA-270-best-cado.poly' -print -quit)
+          test -n "$POLY"
+          cp "$POLY" campaign/RSA-270.poly
+          rm -rf cado-nfs-modern
+          mv extracted/rsa270-tool-bundle/cado cado-nfs-modern
+          BUILD=$(find "$PWD/cado-nfs-modern/build" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -n "$BUILD"
+          printf '%s\n' "$PWD/cado-nfs-modern" > "$BUILD/source-location.txt"
+          echo "CADO=$PWD/cado-nfs-modern" >> "$GITHUB_ENV"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          "$BUILD/sieve/las" -version
+
+      - name: Rebuild 64-bit ideal binaries only
+        run: |
+          sed -i 's/^#define SIZEOF_P_R_VALUES 4$/#define SIZEOF_P_R_VALUES 8/' "$CADO/utils/typedefs.h"
+          test "$(awk '/^#define SIZEOF_P_R_VALUES/{print $3}' "$CADO/utils/typedefs.h)" = 8
+          touch "$CADO/utils/typedefs.h"
+          /usr/bin/time -v -o campaign/work/rebuild.time \
+            make -C "$BUILD" -j4 freerel/fast makefb/fast las/fast \
+            > campaign/work/rebuild.stdout 2> campaign/work/rebuild.stderr
+          sha256sum "$BUILD/sieve/freerel" "$BUILD/sieve/makefb" "$BUILD/sieve/las" \
+            | tee campaign/work/binaries.sha256
+
+      - name: Verify polynomial resultant equals RSA-270
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          N=int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          c=[364247333275683342472365165550476120730693693328818157502991593984,1153973715089888191946389898261544454239234565820467806984,-236435216210702701902151548470267342947180119662,-44103587181491086831987630081373613537,4057688710924064290332793594,118153186763991104,240240]
+          y0=-99499021054511834692076135344701239177544641; y1=6382870559300260766501
+          R=sum(c[i]*(-y0)**i*y1**(6-i) for i in range(7))
+          assert R==N
+          Path('campaign/work/resultant.txt').write_text('resultant_equals_N=true\nresultant_quotient=1\n')
+          PY
+
+      - name: Prove ideal storage accepts primes above 2^30
+        run: |
+          "$BUILD/sieve/freerel" \
+            -poly campaign/RSA-270.poly -lpb0 38 -lpb1 39 \
+            -pmin 1073741800 -pmax 1073741950 \
+            -out campaign/work/freerel-check.gz \
+            > campaign/work/freerel.stdout 2> campaign/work/freerel.stderr
+          gzip -t campaign/work/freerel-check.gz
+          cat campaign/work/freerel.stderr
+
+      - name: Generate production factor base
+        run: |
+          /usr/bin/time -v -o campaign/work/makefb.time \
+            "$BUILD/sieve/makefb" \
+              -poly campaign/RSA-270.poly -lim 2146644785 -maxbits 18 \
+              -out campaign/work/c270.roots1.gz -side 1 -t 4 \
+              > campaign/work/makefb.stdout 2> campaign/work/makefb.stderr
+          gzip -t campaign/work/c270.roots1.gz
+          sha256sum campaign/work/c270.roots1.gz | tee campaign/work/c270.roots1.gz.sha256
+          ls -lh campaign/work/c270.roots1.gz
+
+      - name: Select ten production special-q roots
+        run: |
+          "$BUILD/sieve/las" \
+            -poly campaign/RSA-270.poly \
+            -lim0 1071225238 -lim1 2146644785 \
+            -lpb0 38 -lpb1 39 -mfb0 109 -mfb1 120 \
+            -ncurves0 28 -ncurves1 31 -I 18 \
+            -q0 "$QMIN" -q1 "$QMAX" -sqside 1 \
+            -fb1 campaign/work/c270.roots1.gz -print-todo-list -t 4 \
+            > campaign/work/todo-all.txt 2> campaign/work/todo.stderr
+          grep '^1 ' campaign/work/todo-all.txt | head -10 > campaign/work/todo.txt
+          test "$(wc -l < campaign/work/todo.txt)" -eq 10
+          cat campaign/work/todo.txt
+
+      - name: Sieve ten production I=18 roots
+        continue-on-error: true
+        run: |
+          set +e
+          /usr/bin/time -v -o campaign/work/las.time \
+            timeout --signal=INT --kill-after=60s 15000s \
+            "$BUILD/sieve/las" \
+              -poly campaign/RSA-270.poly \
+              -lim0 1071225238 -lim1 2146644785 \
+              -lpb0 38 -lpb1 39 -mfb0 109 -mfb1 120 \
+              -ncurves0 28 -ncurves1 31 -I 18 \
+              -sqside 1 -fb1 campaign/work/c270.roots1.gz \
+              -todo campaign/work/todo.txt -out campaign/work/relations.gz \
+              -t 4 -production -stats-stderr -job-memory 13 -bkmult 1.1 \
+              > campaign/work/las.stdout 2> campaign/work/las.stderr
+          echo $? > campaign/work/las.rc
+          gzip -t campaign/work/relations.gz || true
+          free -h
+          exit 0
+
+      - name: Scan all relation factors for an exact divisor
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import gzip,json,math,pathlib
+          N=int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          hits=[]; lines=[]
+          p=pathlib.Path('campaign/work/relations.gz')
+          if p.exists():
+              try: lines=[x.strip() for x in gzip.open(p,'rt',errors='strict') if x.strip() and not x.startswith('#')]
+              except Exception: lines=[]
+          for line in lines:
+              for field in line.split(':')[1:]:
+                  for s in field.split(','):
+                      if not s: continue
+                      x=int(s,16); g=math.gcd(x,N)
+                      if 1<g<N: hits.append({'p':str(g),'q':str(N//g),'verified':g*(N//g)==N})
+          out={'N':str(N),'relation_lines':len(lines),'verified_hits':hits}
+          pathlib.Path('campaign/work/factor-scan.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Package checkpoint
+        if: always()
+        run: |
+          find campaign -type f -printf '%P\t%s\n' | sort > campaign/work/files.tsv
+          tar --zstd -cf rsa270-fast2-checkpoint.tar.zst campaign
+          sha256sum rsa270-fast2-checkpoint.tar.zst > rsa270-fast2-checkpoint.tar.zst.sha256
+          ls -lh rsa270-fast2-checkpoint.tar.zst*
+
+      - name: Upload checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-fast2-q1073322392
+          path: |
+            rsa270-fast2-checkpoint.tar.zst
+            rsa270-fast2-checkpoint.tar.zst.sha256
+          compression-level: 0
+          retention-days: 14
