@@ -1,0 +1,97 @@
+name: RSA-270 RSAREF 32-bit seed scan
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths:
+      - .github/workflows/rsa270-rsaref-seed-scan.yml
+      - research/rsa270_timestamp_scan.c
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        mode: [12, 13, 20, 21]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libssl-dev
+      - name: Compile exact scanner
+        run: |
+          cc -O3 -march=x86-64-v2 -fopenmp -Wno-deprecated-declarations \
+            research/rsa270_timestamp_scan.c -lcrypto -o rsa270_timestamp_scan
+      - name: Scan one disjoint seed shard
+        env:
+          MODE: ${{ matrix.mode }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p results
+          WIDTH=536870912
+          START=$((SHARD * WIDTH))
+          END=$(((SHARD + 1) * WIDTH))
+          OUT="results/mode-${MODE}-shard-${SHARD}.txt"
+          set +e
+          /usr/bin/time -v -o "${OUT}.time" \
+            timeout --signal=INT --kill-after=15s 1500s \
+            ./rsa270_timestamp_scan "$START" "$END" "$MODE" 4 4 \
+            > "$OUT" 2>&1
+          RC=$?
+          echo "exit_code=$RC" >> "$OUT"
+          cat "$OUT"
+          if grep -q 'found=1' "$OUT"; then
+            cp "$OUT" "results/HIT-mode-${MODE}-shard-${SHARD}.txt"
+          fi
+          exit 0
+      - name: Upload shard result
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsaref-mode-${{ matrix.mode }}-shard-${{ matrix.shard }}
+          path: results/
+          retention-days: 7
+
+  summarize:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download every shard result
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rsaref-mode-*-shard-*
+          path: all-results
+          merge-multiple: true
+      - name: Build exact coverage summary
+        run: |
+          {
+            echo "RSA-270 RSAREF seed scan"
+            echo "UTC: $(date -u --iso-8601=seconds)"
+            echo "result_files=$(find all-results -name 'mode-*-shard-*.txt' | wc -l)"
+            echo "hits=$(grep -R -l 'found=1' all-results --include='mode-*-shard-*.txt' | wc -l)"
+            echo
+            grep -R -h '^mode=' all-results --include='mode-*-shard-*.txt' | sort -n -t= -k2
+          } | tee summary.txt
+          grep -R -l 'found=1' all-results --include='mode-*-shard-*.txt' > hit-files.txt || true
+          tar -czf rsaref-seed-scan-results.tar.gz all-results summary.txt hit-files.txt
+          sha256sum rsaref-seed-scan-results.tar.gz > rsaref-seed-scan-results.tar.gz.sha256
+      - name: Upload combined summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-rsaref-seed-scan-summary
+          path: |
+            summary.txt
+            hit-files.txt
+            rsaref-seed-scan-results.tar.gz
+            rsaref-seed-scan-results.tar.gz.sha256
+          retention-days: 14
