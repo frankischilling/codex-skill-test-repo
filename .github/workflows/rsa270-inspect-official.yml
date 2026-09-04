@@ -1,0 +1,55 @@
+name: Inspect RSA-270 official checkpoint
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-inspect-official.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and inspect prior official checkpoint
+        run: |
+          mkdir -p incoming extracted diagnostics
+          gh run download 33831505986 --repo "$GITHUB_REPOSITORY" \
+            --name rsa270-gnfs-q1073322392-1073332392-official-v2 \
+            --dir incoming
+          ls -lh incoming
+          TAR=$(find incoming -name '*.tar.zst' | head -1)
+          test -n "$TAR"
+          echo '=== archive top-level ==='
+          tar --zstd -tf "$TAR" | head -200 || true
+          for f in \
+            campaign-output/stderr.log \
+            campaign-output/stdout.log \
+            campaign-output/rc.txt \
+            campaign-output/time.txt \
+            campaign-output/status.json \
+            campaign-output/events.ndjson \
+            campaign-output/c270-log-tail.txt \
+            campaign-output/work-files.tsv \
+            campaign-output/relation-files.txt \
+            campaign-output/verification.json \
+            rsa270-work/c270.log \
+            rsa270-work/c270.parameters_snapshot.0; do
+            echo "=== $f ==="
+            tar --zstd -xOf "$TAR" "$f" 2>/dev/null | tee "diagnostics/$(echo "$f" | tr '/' '_')" || true
+          done
+          echo '=== largest checkpoint files ==='
+          tar --zstd -tvf "$TAR" | sort -k3,3nr | head -50 | tee diagnostics/largest-files.txt || true
+      - name: Upload diagnostics only
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-official-v2-diagnostics
+          path: diagnostics/
+          retention-days: 14
