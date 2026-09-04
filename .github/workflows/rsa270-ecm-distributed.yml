@@ -1,0 +1,121 @@
+name: RSA-270 distributed deterministic ECM
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-ecm-distributed.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  curves:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      N: "233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207"
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified standalone GMP-ECM
+        run: |
+          mkdir -p ecm-package results
+          gh run download 33830083944 --repo "$GITHUB_REPOSITORY" \
+            --name gmp-ecm-static --dir ecm-package
+          chmod +x ecm-package/gmp-ecm-static
+          file ecm-package/gmp-ecm-static
+          ecm-package/gmp-ecm-static -printconfig > results/compile-config.txt 2>&1
+      - name: Run 25 unique sigma curves
+        run: |
+          START=$((1000000 + SHARD * 25))
+          END=$((START + 25))
+          LOG="results/ecm-shard-${SHARD}.log"
+          : > "$LOG"
+          for ((SIGMA=START; SIGMA<END; SIGMA++)); do
+            echo "BEGIN sigma=$SIGMA" | tee -a "$LOG"
+            set +e
+            printf '%s\n' "$N" | timeout --signal=INT --kill-after=15s 1200s \
+              ecm-package/gmp-ecm-static \
+              -sigma "$SIGMA" -maxmem 256 -q 3000000 300000000 \
+              >> "$LOG" 2>&1
+            RC=$?
+            set -e
+            echo "END sigma=$SIGMA rc=$RC" | tee -a "$LOG"
+            python3 - "$N" "$LOG" <<'PY'
+          import math, pathlib, re, sys
+          n = int(sys.argv[1]); text = pathlib.Path(sys.argv[2]).read_text(errors='replace')
+          for s in re.findall(r'(?<!\d)\d{20,300}(?!\d)', text):
+              x = int(s); g = math.gcd(x, n)
+              if 1 < g < n:
+                  q = n // g
+                  assert g*q == n
+                  pathlib.Path('results/VERIFIED-FACTOR.txt').write_text(f'p={g}\nq={q}\nproduct_verified=true\n')
+                  raise SystemExit(0)
+          PY
+            test ! -f results/VERIFIED-FACTOR.txt || break
+          done
+          printf 'sigma_start=%s\nsigma_end_exclusive=%s\n' "$START" "$END" > "results/ecm-shard-${SHARD}.meta"
+      - name: Final exact candidate scan
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, math, pathlib, re
+          n = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          checked=0; hits=[]
+          for p in pathlib.Path('results').glob('*'):
+              if not p.is_file(): continue
+              text=p.read_text(errors='replace')
+              for s in set(re.findall(r'(?<!\d)\d{20,300}(?!\d)', text)):
+                  checked += 1; x=int(s); g=math.gcd(x,n)
+                  if 1<g<n:
+                      q=n//g; hits.append({'file':str(p),'candidate':s,'p':str(g),'q':str(q),'product_verified':g*q==n})
+          out={'shard':int('${{ matrix.shard }}'),'candidates_checked':checked,'verified_hits':hits}
+          pathlib.Path('results/verification.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+      - name: Upload shard output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-ecm-shard-${{ matrix.shard }}
+          path: results/
+          retention-days: 7
+
+  summarize:
+    needs: curves
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rsa270-ecm-shard-*
+          path: all-results
+      - name: Combine verification records
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          records=[]; hits=[]; checked=0
+          for p in pathlib.Path('all-results').rglob('verification.json'):
+              r=json.loads(p.read_text()); records.append(r); checked += r['candidates_checked']; hits += r['verified_hits']
+          out={'completed_shards':len(records),'planned_curves':400,'candidate_values_checked':checked,'verified_hits':hits}
+          pathlib.Path('summary.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+          tar -czf rsa270-ecm-400-curves.tar.gz all-results summary.json
+          sha256sum rsa270-ecm-400-curves.tar.gz > rsa270-ecm-400-curves.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-ecm-400-curve-summary
+          path: |
+            summary.json
+            rsa270-ecm-400-curves.tar.gz
+            rsa270-ecm-400-curves.tar.gz.sha256
+          retention-days: 14
