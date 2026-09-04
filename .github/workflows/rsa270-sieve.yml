@@ -30,17 +30,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends zstd sqlite3 python3 python3-venv
 
-      - name: Download verified CADO artifacts from successful builds
+      - name: Download current verified wide-index CADO artifacts
         run: |
           mkdir -p downloaded/tools downloaded/runtime
-          gh run download 33818693904 --repo "$GITHUB_REPOSITORY" \
+          gh run download 33822782292 --repo "$GITHUB_REPOSITORY" \
             --name rsa270-cado-built-tools --dir downloaded/tools
-          gh run download 33818693982 --repo "$GITHUB_REPOSITORY" \
+          gh run download 33822782342 --repo "$GITHUB_REPOSITORY" \
             --name rsa270-cado-runtime-libs --dir downloaded/runtime
-          sha256sum downloaded/tools/rsa270-cado-built-tools.tar.zst
-          sha256sum downloaded/runtime/rsa270-cado-runtime-libs.tar.gz
           test "$(sha256sum downloaded/tools/rsa270-cado-built-tools.tar.zst | cut -d' ' -f1)" = \
-            "0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af"
+            "1213e5acdf821131008435c330d3353bcf4871505fd929b39e317d86d4a80908"
+          test "$(sha256sum downloaded/runtime/rsa270-cado-runtime-libs.tar.gz | cut -d' ' -f1)" = \
+            "a6a2e6c7655a3c5b8c128d7aecdf8e72f6cfd6e5625b8eb13ddaa8571722200b"
 
       - name: Rehydrate relocatable CADO runtime
         run: |
@@ -56,8 +56,9 @@ jobs:
           echo "RUNTIME_LIB=$PWD/runtime-root/runtime/lib" >> "$GITHUB_ENV"
           echo "WORK=$PWD/rsa270-work" >> "$GITHUB_ENV"
           LD_LIBRARY_PATH="$PWD/runtime-root/runtime/lib" "$BUILD/sieve/las" -version
+          strings "$BUILD/sieve/las" | grep -q SIZEOF_P_R_VALUES || true
 
-      - name: Run one production special-q work unit
+      - name: Run one official-parameter special-q work unit
         id: sieve
         continue-on-error: true
         run: |
@@ -72,12 +73,14 @@ jobs:
               "$N" \
               "$CAM/params.c270" \
               "tasks.polyselect.import=$CAM/RSA-270-best-cado.poly" \
+              tasks.polyselect.admax=0 \
               tasks.maxwu=1 \
               "tasks.sieve.qmin=$QMIN" \
               "tasks.sieve.qmax=$QMAX" \
               "tasks.sieve.qrange=$QRANGE" \
-              tasks.sieve.rels_wanted=1 \
+              tasks.sieve.rels_wanted=1000000000 \
               tasks.filter.run=False \
+              tasks.threads=4 \
               tasks.sieve.las.threads=4 \
               --workdir "$WORK" \
               --server-threads 4 \
@@ -95,7 +98,7 @@ jobs:
         if: always()
         run: |
           python3 - <<'PY'
-          import gzip, json, pathlib, re
+          import gzip, json, math, pathlib, re
           N = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
           roots = [pathlib.Path("campaign-output"), pathlib.Path("rsa270-work")]
           hits, checked, files = [], 0, 0
@@ -103,7 +106,7 @@ jobs:
               if not root.exists():
                   continue
               for p in root.rglob("*"):
-                  if not p.is_file() or p.stat().st_size > 100_000_000:
+                  if not p.is_file() or p.stat().st_size > 150_000_000:
                       continue
                   try:
                       text = gzip.open(p, "rt", errors="replace").read() if p.suffix == ".gz" else p.read_text(errors="replace")
@@ -112,22 +115,24 @@ jobs:
                   files += 1
                   for s in set(re.findall(r"(?<!\\d)\\d{20,300}(?!\\d)", text)):
                       x = int(s); checked += 1
-                      if 1 < x < N and N % x == 0:
-                          q = N // x
-                          hits.append({"file": str(p), "p": str(x), "q": str(q), "product_verified": x*q == N})
+                      g = math.gcd(x, N)
+                      if 1 < g < N:
+                          q = N // g
+                          hits.append({"file": str(p), "candidate": str(x), "p": str(g), "q": str(q), "product_verified": g*q == N})
           result = {"N": str(N), "files_scanned": files, "numeric_candidates_checked": checked, "verified_hits": hits}
           pathlib.Path("campaign-output/verification.json").write_text(json.dumps(result, indent=2))
           print(json.dumps(result, indent=2))
           PY
 
-      - name: Record checkpoint inventory
+      - name: Record relation and checkpoint inventory
         if: always()
         run: |
           find rsa270-work -type f -printf '%P\t%s\n' | sort > campaign-output/work-files.tsv || true
+          find rsa270-work -type f \( -name '*.gz' -o -name '*.rels' \) -print > campaign-output/relation-files.txt || true
           cp "$CAM/RSA-270-best-cado.poly" campaign-output/
           cp "$CAM/params.c270" campaign-output/
           sqlite3 rsa270-work/c270.db '.tables' > campaign-output/db-tables.txt 2>&1 || true
-          tail -300 rsa270-work/c270.log > campaign-output/c270-log-tail.txt 2>/dev/null || true
+          tail -500 rsa270-work/c270.log > campaign-output/c270-log-tail.txt 2>/dev/null || true
 
       - name: Pack resumable work state
         if: always()
@@ -140,7 +145,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rsa270-gnfs-q1073322392-1073332392
+          name: rsa270-gnfs-q1073322392-1073332392-official
           path: |
             rsa270-workunit-checkpoint.tar.zst
             rsa270-workunit-checkpoint.tar.zst.sha256
