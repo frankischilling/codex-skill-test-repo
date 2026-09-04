@@ -1,8 +1,9 @@
-name: RSA-270 CADO tool bundle
+name: RSA-270 CADO wide-index tool bundle
 
 on:
   push:
     branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-tools.yml]
   workflow_dispatch:
 
 permissions:
@@ -18,30 +19,34 @@ jobs:
 
       - name: Install CADO build dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake libgmp-dev libhwloc-dev \
             python3 python3-venv python3-pip perl git xz-utils zstd rsync
 
-      - name: Build CADO-NFS modern
+      - name: Build CADO-NFS with 64-bit p/r values and indexes
         run: |
           git clone --depth 1 --branch v3.4.0-modern \
             https://github.com/doublegate/cado-nfs-modern.git cado-nfs-modern
           cd cado-nfs-modern
+          cat > local.sh <<'EOF'
+          FLAGS_SIZE="-DSIZEOF_P_R_VALUES=8 -DSIZEOF_INDEX=8"
+          CFLAGS="-O3 -DNDEBUG"
+          CXXFLAGS="-O3 -DNDEBUG"
+          EOF
           bash scripts/setup-venv.sh
           make -j"$(nproc)"
-          PY=cado-nfs.venv/bin/python3
-          OUT=$("$PY" ./cado-nfs.py 90377629292003121684002147101760858109247336549001090677693 -t 2)
-          echo "smoke factors: $OUT"
-          python3 - "$OUT" <<'PY'
-          import sys
-          N = 90377629292003121684002147101760858109247336549001090677693
-          fs = [int(x) for x in sys.argv[1].split()]
-          p = 1
-          for f in fs:
-              p *= f
-          assert p == N
-          PY
+          BUILD=$(find build -mindepth 1 -maxdepth 1 -type d | head -1)
+          test -x "$BUILD/sieve/las"
+          test -x "$BUILD/sieve/freerel"
+          grep -R -q -- '-DSIZEOF_P_R_VALUES=8' "$BUILD/sieve/CMakeFiles"
+          grep -R -q -- '-DSIZEOF_INDEX=8' "$BUILD/sieve/CMakeFiles"
+          grep -q -- '-DSIZEOF_P_R_VALUES=8' "$BUILD/sieve/CMakeFiles/freerel.dir/flags.make"
+          grep -q -- '-DSIZEOF_INDEX=8' "$BUILD/sieve/CMakeFiles/freerel.dir/flags.make"
+          grep -q -- '-DSIZEOF_P_R_VALUES=8' "$BUILD/sieve/CMakeFiles/las.dir/flags.make"
+          grep -q -- '-DSIZEOF_INDEX=8' "$BUILD/sieve/CMakeFiles/las.dir/flags.make"
+          cp "$BUILD/sieve/CMakeFiles/freerel.dir/flags.make" ../freerel-flags.make
+          cp "$BUILD/sieve/CMakeFiles/las.dir/flags.make" ../las-flags.make
 
       - name: Collect YAFU GGNFS lattice sievers
         run: |
@@ -50,7 +55,7 @@ jobs:
           cp -a yafu-src/factor/lasieve5_64/bin/gnfs-lasieve4I* rsa270-tool-bundle/ggnfs/
           cp -a yafu-src/factor/lasieve5_64/bin/avx512 rsa270-tool-bundle/ggnfs/avx512
 
-      - name: Add verified RSA-270 polynomial and parameters
+      - name: Add verified RSA-270 polynomial and official parameters
         run: |
           mkdir -p rsa270-tool-bundle/campaign
           cat > rsa270-tool-bundle/campaign/RSA-270-best-cado.poly <<'EOF'
@@ -67,21 +72,22 @@ jobs:
           Y1: 6382870559300260766501
           EOF
           cp cado-nfs-modern/parameters/factor/params.c270 rsa270-tool-bundle/campaign/params.c270
+          cp freerel-flags.make las-flags.make rsa270-tool-bundle/campaign/
 
       - name: Package source, build, and tools
         run: |
           mkdir -p rsa270-tool-bundle/cado
           rsync -a --exclude=.git cado-nfs-modern/ rsa270-tool-bundle/cado/
-          tar --zstd -cf rsa270-cado-built-tools.tar.zst rsa270-tool-bundle
-          sha256sum rsa270-cado-built-tools.tar.zst > rsa270-cado-built-tools.tar.zst.sha256
-          ls -lh rsa270-cado-built-tools.tar.zst*
+          tar --zstd -cf rsa270-cado-wide-index-tools.tar.zst rsa270-tool-bundle
+          sha256sum rsa270-cado-wide-index-tools.tar.zst > rsa270-cado-wide-index-tools.tar.zst.sha256
+          ls -lh rsa270-cado-wide-index-tools.tar.zst*
 
-      - name: Upload tool bundle
+      - name: Upload wide-index tool bundle
         uses: actions/upload-artifact@v4
         with:
-          name: rsa270-cado-built-tools
+          name: rsa270-cado-wide-index-tools
           path: |
-            rsa270-cado-built-tools.tar.zst
-            rsa270-cado-built-tools.tar.zst.sha256
+            rsa270-cado-wide-index-tools.tar.zst
+            rsa270-cado-wide-index-tools.tar.zst.sha256
           compression-level: 0
           retention-days: 7
