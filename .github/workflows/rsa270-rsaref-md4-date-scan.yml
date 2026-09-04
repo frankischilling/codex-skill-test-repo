@@ -1,0 +1,102 @@
+name: RSA challenge MD4 1989-1991 seed calibration
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths:
+      - .github/workflows/rsa270-rsaref-md4-date-scan.yml
+      - research/rsa270_md4_timestamp_scan.c
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: a
+            modes: "0 1 2 3 4 5 10 11 14"
+          - group: b
+            modes: "15 16 17 18 19 22 23 24 30"
+          - group: c
+            modes: "31 32 33 34 35 36 37 38 39"
+          - group: d
+            modes: "40 41 42 43 50 51 52 53 54"
+          - group: e
+            modes: "55 56 57 58 59 60 61 62 63"
+    env:
+      START: "599616000"
+      END: "669340800"
+      NCALLS: "16"
+      MODES: ${{ matrix.modes }}
+      GROUP: ${{ matrix.group }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and verify MD4 scanner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential
+          cc -O3 -march=native -fopenmp \
+            research/rsa270_md4_timestamp_scan.c \
+            -o rsa270_md4_timestamp_scan
+          OUT=$(./rsa270_md4_timestamp_scan --selftest)
+          echo "$OUT"
+          test "$(echo "$OUT" | sed -n 1p)" = 31d6cfe0d16ae931b73c59d7e0c089c0
+          test "$(echo "$OUT" | sed -n 2p)" = bde52cb31de33e46245e05fbdbd6fb24
+
+      - name: Scan every second from 1989 through challenge publication
+        run: |
+          mkdir -p results
+          : > results/summary.txt
+          : > results/hits.txt
+          for mode in $MODES; do
+            echo "===== mode=$mode =====" | tee -a results/summary.txt
+            set +e
+            /usr/bin/time -v -o "results/mode-${mode}.time" \
+              timeout --signal=INT --kill-after=30s 10000s \
+              ./rsa270_md4_timestamp_scan "$START" "$END" "$mode" "$NCALLS" 4 \
+              > "results/mode-${mode}.txt" 2>&1
+            rc=$?
+            set -e
+            echo "$rc" > "results/mode-${mode}.rc"
+            cat "results/mode-${mode}.txt" | tee -a results/summary.txt
+            if grep -q 'found=1' "results/mode-${mode}.txt"; then
+              cat "results/mode-${mode}.txt" >> results/hits.txt
+            fi
+          done
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          rows=[]
+          for p in sorted(pathlib.Path('results').glob('mode-*.txt')):
+              t=p.read_text(errors='replace').strip()
+              m=re.search(r'hash=MD4 mode=(\d+).*?elapsed=([0-9.]+).*?found=(\d+)(?: seed=(\d+) which=(\d+) call=(\d+))?',t)
+              if m:
+                  rows.append({'mode':int(m.group(1)),
+                               'elapsed_seconds':float(m.group(2)),
+                               'found':bool(int(m.group(3))),
+                               'seed':int(m.group(4)) if m.group(4) else None,
+                               'which_factor':int(m.group(5)) if m.group(5) else None,
+                               'call_index':int(m.group(6)) if m.group(6) else None})
+          out={'hash':'MD4','group':os.environ['GROUP'],
+               'start_unix':int(os.environ['START']),
+               'end_unix_exclusive':int(os.environ['END']),
+               'ncalls':int(os.environ['NCALLS']),
+               'modes':rows,'hits':[x for x in rows if x['found']]}
+          pathlib.Path('results/exact-status.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Upload calibration shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-rsaref-md4-date-${{ matrix.group }}
+          path: results/
+          compression-level: 6
+          retention-days: 14
