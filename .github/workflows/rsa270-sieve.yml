@@ -1,0 +1,148 @@
+name: RSA-270 GNFS production sieve
+
+on:
+  push:
+    branches: [rsa270-campaign-20260903]
+    paths: [.github/workflows/rsa270-sieve.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sieve-one-workunit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      N: "233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207"
+      QMIN: "1073322392"
+      QMAX: "1073332392"
+      QRANGE: "10000"
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout campaign branch
+        uses: actions/checkout@v4
+
+      - name: Install runtime tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zstd sqlite3 python3 python3-venv
+
+      - name: Download verified CADO artifacts from successful builds
+        run: |
+          mkdir -p downloaded/tools downloaded/runtime
+          gh run download 33818693904 --repo "$GITHUB_REPOSITORY" \
+            --name rsa270-cado-built-tools --dir downloaded/tools
+          gh run download 33818693982 --repo "$GITHUB_REPOSITORY" \
+            --name rsa270-cado-runtime-libs --dir downloaded/runtime
+          sha256sum downloaded/tools/rsa270-cado-built-tools.tar.zst
+          sha256sum downloaded/runtime/rsa270-cado-runtime-libs.tar.gz
+          test "$(sha256sum downloaded/tools/rsa270-cado-built-tools.tar.zst | cut -d' ' -f1)" = \
+            "0f5238567ad06606813bd3d9306d7f54ab4e61426747e948cb84466bd70a18af"
+
+      - name: Rehydrate relocatable CADO runtime
+        run: |
+          mkdir -p runtime-root
+          tar --zstd -xf downloaded/tools/rsa270-cado-built-tools.tar.zst -C runtime-root
+          tar -xzf downloaded/runtime/rsa270-cado-runtime-libs.tar.gz -C runtime-root
+          CADO="$PWD/runtime-root/rsa270-tool-bundle/cado"
+          BUILD=$(find "$CADO/build" -mindepth 1 -maxdepth 1 -type d | head -1)
+          printf '%s\n' "$CADO" > "$BUILD/source-location.txt"
+          echo "CADO=$CADO" >> "$GITHUB_ENV"
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "CAM=$PWD/runtime-root/rsa270-tool-bundle/campaign" >> "$GITHUB_ENV"
+          echo "RUNTIME_LIB=$PWD/runtime-root/runtime/lib" >> "$GITHUB_ENV"
+          echo "WORK=$PWD/rsa270-work" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$PWD/runtime-root/runtime/lib" "$BUILD/sieve/las" -version
+
+      - name: Run one production special-q work unit
+        id: sieve
+        continue-on-error: true
+        run: |
+          mkdir -p "$WORK" campaign-output
+          export LD_LIBRARY_PATH="$RUNTIME_LIB:${LD_LIBRARY_PATH:-}"
+          export PYTHONPATH="$CADO/cado-nfs.venv/lib/python3.12/site-packages"
+          cd "$BUILD"
+          set +e
+          /usr/bin/time -v -o "$GITHUB_WORKSPACE/campaign-output/time.txt" \
+            timeout --signal=INT --kill-after=60s 19500s \
+            python3 ./cado-nfs.py \
+              "$N" \
+              "$CAM/params.c270" \
+              "tasks.polyselect.import=$CAM/RSA-270-best-cado.poly" \
+              tasks.maxwu=1 \
+              "tasks.sieve.qmin=$QMIN" \
+              "tasks.sieve.qmax=$QMAX" \
+              "tasks.sieve.qrange=$QRANGE" \
+              tasks.sieve.rels_wanted=1 \
+              tasks.filter.run=False \
+              tasks.sieve.las.threads=4 \
+              --workdir "$WORK" \
+              --server-threads 4 \
+              --screenlog INFO \
+              --filelog DEBUG \
+              --json-status "$GITHUB_WORKSPACE/campaign-output/status.json" \
+              --json-log "$GITHUB_WORKSPACE/campaign-output/events.ndjson" \
+              > "$GITHUB_WORKSPACE/campaign-output/stdout.log" \
+              2> "$GITHUB_WORKSPACE/campaign-output/stderr.log"
+          rc=$?
+          echo "$rc" | tee "$GITHUB_WORKSPACE/campaign-output/rc.txt"
+          exit 0
+
+      - name: Verify all result-like integers exactly
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import gzip, json, pathlib, re
+          N = int("233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207")
+          roots = [pathlib.Path("campaign-output"), pathlib.Path("rsa270-work")]
+          hits, checked, files = [], 0, 0
+          for root in roots:
+              if not root.exists():
+                  continue
+              for p in root.rglob("*"):
+                  if not p.is_file() or p.stat().st_size > 100_000_000:
+                      continue
+                  try:
+                      text = gzip.open(p, "rt", errors="replace").read() if p.suffix == ".gz" else p.read_text(errors="replace")
+                  except Exception:
+                      continue
+                  files += 1
+                  for s in set(re.findall(r"(?<!\\d)\\d{20,300}(?!\\d)", text)):
+                      x = int(s); checked += 1
+                      if 1 < x < N and N % x == 0:
+                          q = N // x
+                          hits.append({"file": str(p), "p": str(x), "q": str(q), "product_verified": x*q == N})
+          result = {"N": str(N), "files_scanned": files, "numeric_candidates_checked": checked, "verified_hits": hits}
+          pathlib.Path("campaign-output/verification.json").write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+
+      - name: Record checkpoint inventory
+        if: always()
+        run: |
+          find rsa270-work -type f -printf '%P\t%s\n' | sort > campaign-output/work-files.tsv || true
+          cp "$CAM/RSA-270-best-cado.poly" campaign-output/
+          cp "$CAM/params.c270" campaign-output/
+          sqlite3 rsa270-work/c270.db '.tables' > campaign-output/db-tables.txt 2>&1 || true
+          tail -300 rsa270-work/c270.log > campaign-output/c270-log-tail.txt 2>/dev/null || true
+
+      - name: Pack resumable work state
+        if: always()
+        run: |
+          tar --zstd --ignore-failed-read -cf rsa270-workunit-checkpoint.tar.zst rsa270-work campaign-output
+          sha256sum rsa270-workunit-checkpoint.tar.zst > rsa270-workunit-checkpoint.tar.zst.sha256
+          ls -lh rsa270-workunit-checkpoint.tar.zst*
+
+      - name: Upload production checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-gnfs-q1073322392-1073332392
+          path: |
+            rsa270-workunit-checkpoint.tar.zst
+            rsa270-workunit-checkpoint.tar.zst.sha256
+          compression-level: 0
+          retention-days: 14
