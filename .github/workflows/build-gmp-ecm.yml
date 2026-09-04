@@ -1,4 +1,5 @@
-name: Build standalone GMP-ECM
+name: RSA-270 standalone GMP-ECM p+1 campaign
+# campaign-trigger: 2026-09-04T15:45Z
 
 on:
   push:
@@ -20,26 +21,110 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential autoconf automake libtool m4 git libgmp-dev
-      - name: Build static GMP-ECM
+      - name: Build optimized standalone GMP-ECM
         run: |
           git clone --depth 1 https://github.com/sethtroisi/gmp-ecm.git
           cd gmp-ecm
           autoreconf -i
-          ./configure --disable-shared --enable-static CFLAGS='-O3 -march=x86-64-v2' LDFLAGS='-static'
+          ./configure --disable-shared --enable-static CFLAGS='-O3 -march=native'
           make -j"$(nproc)"
           strip ecm || true
           file ecm
           ldd ecm || true
-          printf '1000003\n' | ./ecm -pp1 1000 10000
+          echo 4190453151940208656715582382315221647 \
+            | ./ecm -pp1 -x0 7 2337233 132554351 \
+            | tee known-factor-test.log
+          grep -q '4190453151940208656715582382315221647' known-factor-test.log
           mkdir -p ../artifact
-          cp ecm ../artifact/gmp-ecm-static
-          cp README* ../artifact/ 2>/dev/null || true
+          cp ecm ../artifact/gmp-ecm
+          cp known-factor-test.log ../artifact/
           ./ecm -v > ../artifact/version.txt 2>&1 || true
-          sha256sum ../artifact/gmp-ecm-static > ../artifact/gmp-ecm-static.sha256
+          sha256sum ../artifact/gmp-ecm > ../artifact/gmp-ecm.sha256
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: gmp-ecm-static
+          name: gmp-ecm-rsa270
           path: artifact/
           compression-level: 0
-          retention-days: 7
+          retention-days: 14
+
+  pp1:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 0
+            bases: "3 5 7 11"
+          - shard: 1
+            bases: "13 17 19 23"
+          - shard: 2
+            bases: "29 31 37 41"
+          - shard: 3
+            bases: "43 47 53 59"
+          - shard: 4
+            bases: "61 67 71 73"
+          - shard: 5
+            bases: "79 83 89 97"
+          - shard: 6
+            bases: "101 103 107 109"
+          - shard: 7
+            bases: "113 127 131 137"
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gmp-ecm-rsa270
+          path: tool
+      - name: Run exact standalone Williams p+1 bases
+        env:
+          N: "233108530344407544527637656910680524145619812480305449042948611968495918245135782867888369318577116418213919268572658314913060672626911354027609793166341626693946596196427744273886601876896313468704059066746903123910748277606548649151920812699309766587514735456594993207"
+          BASES: ${{ matrix.bases }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          chmod +x tool/gmp-ecm
+          mkdir -p results
+          set +e
+          for x0 in $BASES; do
+            echo "===== x0=$x0 =====" | tee -a results/combined.log
+            /usr/bin/time -v -o "results/x0-${x0}.time" \
+              timeout --signal=INT --kill-after=30s 4800s \
+              bash -c 'printf "%s\n" "$0" | "$1" -pp1 -x0 "$2" 20000000 200000000000' \
+              "$N" "$PWD/tool/gmp-ecm" "$x0" \
+              > "results/x0-${x0}.stdout" 2> "results/x0-${x0}.stderr"
+            rc=$?
+            echo "$rc" > "results/x0-${x0}.rc"
+            cat "results/x0-${x0}.stdout" "results/x0-${x0}.stderr" >> results/combined.log
+          done
+          set -e
+          python3 - <<'PY'
+          import json, math, os, pathlib, re
+          N=int(os.environ['N'])
+          candidates=set()
+          for p in pathlib.Path('results').glob('x0-*.*out'):
+              for s in re.findall(r'\d{10,}',p.read_text(errors='replace')):
+                  candidates.add(int(s))
+          hits=[]
+          for x in sorted(candidates):
+              g=math.gcd(N,x)
+              if 1<g<N and N%g==0:
+                  q=N//g
+                  hits.append({'p':str(g),'q':str(q),'product_verified':g*q==N})
+          status={'shard':int(os.environ['SHARD']),'bases':[int(x) for x in os.environ['BASES'].split()],
+                  'B1':20000000,'B2':200000000000,
+                  'numeric_candidates_exactly_checked':len(candidates),'verified_hits':hits}
+          pathlib.Path('results/exact-status.json').write_text(json.dumps(status,indent=2))
+          if hits:
+              pathlib.Path('results/VERIFIED-FACTORIZATION.txt').write_text(
+                  '\n'.join(f"p={h['p']}\nq={h['q']}\nproduct_verified={h['product_verified']}" for h in hits))
+          print(json.dumps(status,indent=2))
+          PY
+      - name: Upload p+1 shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsa270-pp1-shard-${{ matrix.shard }}
+          path: results/
+          compression-level: 6
+          retention-days: 14
