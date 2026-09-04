@@ -1,5 +1,5 @@
 name: RSA-270 fast 64-bit GNFS sieve v3
-# campaign-trigger: 2026-09-04T15:18Z
+# campaign-trigger: 2026-09-04T15:25Z
 
 on:
   push:
@@ -46,7 +46,14 @@ jobs:
           p.write_text(s)
           PY
           chmod +x rsa270/fast_sieve.sh
-          bash rsa270/fast_sieve.sh
+          mkdir -p campaign/work
+          set +e
+          bash -x rsa270/fast_sieve.sh \
+            > campaign/work/driver.stdout \
+            2> campaign/work/driver.stderr
+          rc=$?
+          echo "$rc" > campaign/work/driver.rc
+          exit 0
 
       - name: Upload resumable checkpoint
         if: always()
